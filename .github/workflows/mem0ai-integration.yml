@@ -1,0 +1,300 @@
+name: Integrate mem0ai Repositories
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_sync:
+        description: 'Force sync even if branch exists'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  integrate-mem0ai-repos:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout central repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        lfs: true
+
+    - name: Setup git authentication and user
+      run: |
+        if [ -n "${{ secrets.GH_PAT }}" ]; then
+          git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
+          git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/ZoneCog/mem0ai-central.git
+        else
+          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+        fi
+        git config --global user.name 'github-actions[bot]'
+        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+    - name: Set up Git LFS
+      run: |
+        git lfs install
+        echo "Git LFS installed successfully"
+
+    - name: Fetch all LFS objects (Full integrity)
+      run: |
+        git lfs fetch --all
+        git lfs checkout
+        echo "LFS objects fetched and checked out"
+
+    - name: LFS Integrity Check
+      run: |
+        echo "Performing LFS integrity check..."
+        
+        # Function to check LFS file integrity
+        check_lfs_integrity() {
+          local missing_files=0
+          
+          # Check if any LFS files are tracked
+          if git lfs ls-files >/dev/null 2>&1; then
+            echo "Checking LFS tracked files..."
+            
+            # List all LFS tracked files and verify they exist
+            git lfs ls-files | awk '{print $3}' | while read -r file; do
+              if [ -n "$file" ] && [ ! -f "$file" ]; then
+                echo "ERROR: Missing LFS file: $file"
+                missing_files=$((missing_files + 1))
+              else
+                echo "✓ LFS file present: $file"
+              fi
+            done
+            
+            # If files are missing, attempt recovery
+            if [ $missing_files -gt 0 ]; then
+              echo "Attempting to recover missing LFS files..."
+              git lfs pull
+              git lfs checkout
+              
+              # Re-check after recovery attempt
+              git lfs ls-files | awk '{print $3}' | while read -r file; do
+                if [ -n "$file" ] && [ ! -f "$file" ]; then
+                  echo "FATAL: Unable to recover LFS file: $file"
+                  exit 1
+                fi
+              done
+            fi
+          else
+            echo "No LFS files tracked in repository"
+          fi
+        }
+        
+        # Execute integrity check
+        check_lfs_integrity
+        echo "LFS integrity check completed successfully"
+
+    - name: Define repository list
+      run: |
+        # Hardcoded list of mem0ai repositories to integrate
+        REPO_LIST="mem0 embedchainjs community-showcase .github qna-bot-template-py qna-bot-template-js chat-bot-template-py embedchain-admin examples friend-integration autogen mem0-chrome-extension companion-nextjs-starter mem0-mcp personalized-deep-research deep-research grok3-api"
+        echo "REPO_LIST=$REPO_LIST" >> $GITHUB_ENV
+        echo "Repository list: $REPO_LIST"
+
+    - name: Determine branch name
+      id: determine-branch
+      run: |
+        BASE_BRANCH="mem0ai-integration"
+        BRANCH="$BASE_BRANCH"
+        VERSION=1
+        
+        # Check if force sync is enabled
+        if [ "${{ inputs.force_sync }}" = "true" ]; then
+          echo "Force sync enabled, will overwrite existing branch if it exists"
+          BRANCH="$BASE_BRANCH"
+        else
+          # Find available branch name
+          while git ls-remote --exit-code --heads origin "$BRANCH"; do
+            VERSION=$((VERSION + 1))
+            BRANCH="${BASE_BRANCH}-v${VERSION}"
+          done
+        fi
+        
+        echo "BRANCH_NAME=$BRANCH" >> $GITHUB_ENV
+        echo "Determined branch name: $BRANCH"
+
+    - name: Create or switch to branch
+      run: |
+        if [ "${{ inputs.force_sync }}" = "true" ] && git ls-remote --exit-code --heads origin "$BRANCH_NAME"; then
+          echo "Force sync enabled, switching to existing branch"
+          git fetch origin "$BRANCH_NAME"
+          git checkout "$BRANCH_NAME"
+        else
+          echo "Creating new branch: $BRANCH_NAME"
+          git checkout -b "$BRANCH_NAME"
+        fi
+
+    - name: Clean untracked files
+      run: |
+        git clean -fdx
+
+    - name: Clone and integrate mem0ai repositories
+      run: |
+        echo "Starting integration of mem0ai repositories..."
+        echo "Repository list: $REPO_LIST"
+        
+        for REPO in $REPO_LIST; do
+          echo "Processing repository: $REPO"
+          
+          # Skip if repository already exists and force sync is not enabled
+          if [ -d "$REPO" ] && [ "${{ inputs.force_sync }}" != "true" ]; then
+            echo "Repository $REPO already exists, skipping (use force_sync to overwrite)"
+            continue
+          fi
+          
+          # Remove existing directory if force sync is enabled
+          if [ -d "$REPO" ] && [ "${{ inputs.force_sync }}" = "true" ]; then
+            echo "Force sync enabled, removing existing $REPO directory"
+            rm -rf "$REPO"
+          fi
+          
+          {
+            echo "Cloning $REPO from mem0ai organization..."
+            # Clone with LFS support
+            git clone "https://github.com/mem0ai/$REPO.git" "$REPO" &&
+            
+            # Setup LFS for the cloned repository
+            cd "$REPO" &&
+            git lfs install &&
+            git lfs fetch --all &&
+            git lfs checkout &&
+            cd .. &&
+            
+            if [ -d "$REPO" ] && [ "$(ls -A $REPO)" ]; then
+              # Verify LFS files are present before removing .git
+              if [ -f "$REPO/.gitattributes" ]; then
+                echo "Checking LFS files in $REPO before sync..."
+                cd "$REPO"
+                
+                # Check for LFS tracked files and ensure they're materialized
+                if git lfs ls-files >/dev/null 2>&1; then
+                  git lfs ls-files | awk '{print $3}' | while read -r file; do
+                    if [ -n "$file" ] && [ ! -f "$file" ]; then
+                      echo "WARNING: LFS file missing in $REPO: $file"
+                      echo "Attempting recovery..."
+                      git lfs pull "$file" || echo "Could not recover $file"
+                    fi
+                  done
+                fi
+                cd ..
+              fi
+              
+              # Remove git history
+              echo "Removing git history from $REPO..."
+              rm -rf "$REPO/.git"
+              
+              # Add to central repository
+              git add "$REPO"
+              git commit -m "Integrate $REPO repository from mem0ai organization"
+              echo "Successfully integrated $REPO"
+            else
+              echo "Failed to clone $REPO or $REPO is empty"
+            fi
+          } || {
+            echo "ERROR: Failed to process $REPO, skipping..."
+          }
+        done
+
+    - name: List integrated repositories
+      run: |
+        echo "Listing integrated repositories:"
+        ls -la
+        echo ""
+        echo "Contents of integrated repositories:"
+        for REPO in $REPO_LIST; do
+          if [ -d "$REPO" ]; then
+            echo "=== Contents of $REPO ==="
+            ls -la "$REPO" | head -10
+            echo ""
+          else
+            echo "Repository $REPO not found"
+          fi
+        done
+
+    - name: Pre-push LFS Integrity Validation
+      run: |
+        echo "Performing final LFS integrity check before push..."
+        
+        # Ensure all LFS objects are present and valid
+        if git lfs ls-files >/dev/null 2>&1; then
+          echo "Validating LFS objects before push..."
+          
+          # Check all LFS files are materialized
+          lfs_issues=0
+          git lfs ls-files | awk '{print $3}' | while read -r file; do
+            if [ -n "$file" ]; then
+              if [ ! -f "$file" ]; then
+                echo "CRITICAL: Missing LFS file before push: $file"
+                lfs_issues=$((lfs_issues + 1))
+              elif [ ! -s "$file" ]; then
+                echo "CRITICAL: Empty LFS file before push: $file"
+                lfs_issues=$((lfs_issues + 1))
+              else
+                echo "✓ Validated LFS file: $file"
+              fi
+            fi
+          done
+          
+          # Final recovery attempt if issues found
+          if [ $lfs_issues -gt 0 ]; then
+            echo "Attempting final LFS recovery before push..."
+            git lfs fetch --all
+            git lfs checkout
+            
+            # Re-validate after recovery
+            git lfs ls-files | awk '{print $3}' | while read -r file; do
+              if [ -n "$file" ] && [ ! -f "$file" ]; then
+                echo "FATAL: Cannot recover LFS file for push: $file"
+                echo "Push will be aborted to prevent LFS corruption"
+                exit 1
+              fi
+            done
+          fi
+          
+          echo "All LFS objects validated successfully"
+        else
+          echo "No LFS files to validate"
+        fi
+
+    - name: Push changes
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_PAT: ${{ secrets.GH_PAT }}
+      run: |
+        echo "Pushing changes to branch: $BRANCH_NAME"
+        if [ -n "$GH_PAT" ]; then
+          git push "https://x-access-token:$GH_PAT@github.com/ZoneCog/mem0ai-central.git" "$BRANCH_NAME"
+        else
+          git push "https://$GITHUB_TOKEN@github.com/ZoneCog/mem0ai-central.git" $BRANCH_NAME
+        fi
+        echo "Successfully pushed mem0ai repository integration to branch: $BRANCH_NAME"
+
+    - name: Create Pull Request
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_PAT: ${{ secrets.GH_PAT }}
+      run: |
+        # Create a pull request for the integration
+        TITLE="Integrate mem0ai repositories into central repository"
+        BODY="This PR integrates the following repositories from the mem0ai organization:
+
+        $(echo "$REPO_LIST" | tr ' ' '\n' | sed 's/^/- /')
+
+        All repositories have been cloned, their git history removed, and integrated as subfolders in this central repository. LFS support has been maintained throughout the process."
+        
+        # Use gh CLI to create PR if available, otherwise use curl
+        if command -v gh >/dev/null 2>&1; then
+          if [ -n "$GH_PAT" ]; then
+            echo "$GH_PAT" | gh auth login --with-token
+          fi
+          gh pr create --title "$TITLE" --body "$BODY" --base main --head "$BRANCH_NAME" || echo "PR creation failed or PR already exists"
+        else
+          echo "gh CLI not available, PR creation skipped"
+        fi
