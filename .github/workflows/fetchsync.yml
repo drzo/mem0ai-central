@@ -26,12 +26,69 @@ jobs:
       uses: actions/checkout@v4
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
+        lfs: true
+
+    - name: Set up Git LFS
+      run: |
+        git lfs install
+        echo "Git LFS installed successfully"
+
+    - name: Fetch all LFS objects (Full integrity)
+      run: |
+        git lfs fetch --all
+        git lfs checkout
+        echo "LFS objects fetched and checked out"
 
     - name: Setup git authentication and user
       run: |
         git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
         git config --global user.name 'github-actions[bot]'
         git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+    - name: LFS Integrity Check
+      run: |
+        echo "Performing LFS integrity check..."
+        
+        # Function to check LFS file integrity
+        check_lfs_integrity() {
+          local missing_files=0
+          
+          # Check if any LFS files are tracked
+          if git lfs ls-files >/dev/null 2>&1; then
+            echo "Checking LFS tracked files..."
+            
+            # List all LFS tracked files and verify they exist
+            git lfs ls-files | awk '{print $3}' | while read -r file; do
+              if [ -n "$file" ] && [ ! -f "$file" ]; then
+                echo "ERROR: Missing LFS file: $file"
+                missing_files=$((missing_files + 1))
+              else
+                echo "✓ LFS file present: $file"
+              fi
+            done
+            
+            # If files are missing, attempt recovery
+            if [ $missing_files -gt 0 ]; then
+              echo "Attempting to recover missing LFS files..."
+              git lfs pull
+              git lfs checkout
+              
+              # Re-check after recovery attempt
+              git lfs ls-files | awk '{print $3}' | while read -r file; do
+                if [ -n "$file" ] && [ ! -f "$file" ]; then
+                  echo "FATAL: Unable to recover LFS file: $file"
+                  exit 1
+                fi
+              done
+            fi
+          else
+            echo "No LFS files tracked in repository"
+          fi
+        }
+        
+        # Execute integrity check
+        check_lfs_integrity
+        echo "LFS integrity check completed successfully"
 
     - name: Determine branch name
       id: determine-branch
@@ -79,8 +136,35 @@ jobs:
           fi
           echo "Processing $REPO..."
           {
+            # Clone with LFS support
             git clone "https://github.com/${{ inputs.org_name }}/$REPO.git" "$REPO" &&
+            
+            # Setup LFS for the cloned repository
+            cd "$REPO" &&
+            git lfs install &&
+            git lfs fetch --all &&
+            git lfs checkout &&
+            cd .. &&
+            
             if [ -d "$REPO" ] && [ "$(ls -A $REPO)" ]; then
+              # Verify LFS files are present before removing .git
+              if [ -f "$REPO/.gitattributes" ]; then
+                echo "Checking LFS files in $REPO before sync..."
+                cd "$REPO"
+                
+                # Check for LFS tracked files and ensure they're materialized
+                if git lfs ls-files >/dev/null 2>&1; then
+                  git lfs ls-files | awk '{print $3}' | while read -r file; do
+                    if [ -n "$file" ] && [ ! -f "$file" ]; then
+                      echo "WARNING: LFS file missing in $REPO: $file"
+                      echo "Attempting recovery..."
+                      git lfs pull "$file" || echo "Could not recover $file"
+                    fi
+                  done
+                fi
+                cd ..
+              fi
+              
               rm -rf "$REPO/.git"
               git add "$REPO"
               git commit -m "Add $REPO repository as a subfolder"
@@ -101,6 +185,51 @@ jobs:
             ls -la "$REPO"
           fi
         done
+
+    - name: Pre-push LFS Integrity Validation
+      run: |
+        echo "Performing final LFS integrity check before push..."
+        
+        # Ensure all LFS objects are present and valid
+        if git lfs ls-files >/dev/null 2>&1; then
+          echo "Validating LFS objects before push..."
+          
+          # Check all LFS files are materialized
+          lfs_issues=0
+          git lfs ls-files | awk '{print $3}' | while read -r file; do
+            if [ -n "$file" ]; then
+              if [ ! -f "$file" ]; then
+                echo "CRITICAL: Missing LFS file before push: $file"
+                lfs_issues=$((lfs_issues + 1))
+              elif [ ! -s "$file" ]; then
+                echo "CRITICAL: Empty LFS file before push: $file"
+                lfs_issues=$((lfs_issues + 1))
+              else
+                echo "✓ Validated LFS file: $file"
+              fi
+            fi
+          done
+          
+          # Final recovery attempt if issues found
+          if [ $lfs_issues -gt 0 ]; then
+            echo "Attempting final LFS recovery before push..."
+            git lfs fetch --all
+            git lfs checkout
+            
+            # Re-validate after recovery
+            git lfs ls-files | awk '{print $3}' | while read -r file; do
+              if [ -n "$file" ] && [ ! -f "$file" ]; then
+                echo "FATAL: Cannot recover LFS file for push: $file"
+                echo "Push will be aborted to prevent LFS corruption"
+                exit 1
+              fi
+            done
+          fi
+          
+          echo "All LFS objects validated successfully"
+        else
+          echo "No LFS files to validate"
+        fi
 
     - name: Push changes
       env:
