@@ -1,4 +1,6 @@
 name: Fetch & Sync Repositories
+permissions:
+  contents: write
 
 on:
   workflow_dispatch:
