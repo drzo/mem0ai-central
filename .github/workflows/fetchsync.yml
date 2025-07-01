@@ -1,4 +1,4 @@
-name: Fetch & Sync Repositories
+name: Fetch & Sync Repositories 1
 
 on:
   workflow_dispatch:
