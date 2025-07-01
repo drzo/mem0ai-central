@@ -1,0 +1,13 @@
+# 1. Checkout main branch (or a branch with no LFS issues)
+git checkout main
+
+# 2. Create a new branch
+git checkout -b mem0ai-v2
+
+# 3. Optionally, make a trivial commit to avoid LFS triggers
+touch .branch-init
+git add .branch-init
+git commit -m "Initialize mem0ai-v2 branch with empty marker"
+
+# 4. Push just the branch and commit
+git push origin mem0ai-v2
