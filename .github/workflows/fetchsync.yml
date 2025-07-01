@@ -28,6 +28,12 @@ jobs:
         token: ${{ secrets.GITHUB_TOKEN }}
         lfs: true
 
+    - name: Setup git authentication and user
+      run: |
+        git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+        git config --global user.name 'github-actions[bot]'
+        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
     - name: Set up Git LFS
       run: |
         git lfs install
@@ -38,12 +44,6 @@ jobs:
         git lfs fetch --all
         git lfs checkout
         echo "LFS objects fetched and checked out"
-
-    - name: Setup git authentication and user
-      run: |
-        git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
-        git config --global user.name 'github-actions[bot]'
-        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
 
     - name: LFS Integrity Check
       run: |
