@@ -7,6 +7,10 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   fetch-sync-repos:
     runs-on: ubuntu-latest
@@ -25,11 +29,16 @@ jobs:
     - name: Checkout central repository
       uses: actions/checkout@v4
       with:
-        token: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
     - name: Setup git authentication and user
       run: |
-        git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+        if [ -n "${{ secrets.GH_PAT }}" ]; then
+          git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
+          git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/ZoneCog/mem0ai-central.git
+        else
+          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+        fi
         git config --global user.name 'github-actions[bot]'
         git config --global user.email 'github-actions[bot]@users.noreply.github.com'
 
@@ -105,5 +114,10 @@ jobs:
     - name: Push changes
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_PAT: ${{ secrets.GH_PAT }}
       run: |
-        git push "https://${{ secrets.GITHUB_TOKEN }}@github.com/ZoneCog/${{ inputs.org_name }}-central.git" $BRANCH_NAME
+        if [ -n "$GH_PAT" ]; then
+          git push "https://x-access-token:$GH_PAT@github.com/ZoneCog/${{ inputs.org_name }}-central.git" $BRANCH_NAME
+        else
+          git push "https://$GITHUB_TOKEN@github.com/ZoneCog/${{ inputs.org_name }}-central.git" $BRANCH_NAME
+        fi
