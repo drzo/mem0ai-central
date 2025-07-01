@@ -1,35 +1,28 @@
-name: Fetch & Sync Repositories 1
+name: Integrate mem0ai Repositories
 
 on:
   workflow_dispatch:
     inputs:
-      org_name:
-        required: true
-        type: string
+      force_sync:
+        description: 'Force sync even if branch exists'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  fetch-sync-repos:
+  integrate-mem0ai-repos:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Fetch repository list from organization
-      run: |
-        curl -s https://api.github.com/orgs/${{ inputs.org_name }}/repos?per_page=100 | jq -r '.[].name' > repo_list.txt
-
-    - name: Upload repo_list.txt
-      uses: actions/upload-artifact@v4
-      with:
-        name: repo_list
-        path: repo_list.txt
-
     - name: Checkout central repository
       uses: actions/checkout@v4
       with:
         token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        lfs: true
 
     - name: Setup git authentication and user
       run: |
@@ -98,54 +91,74 @@ jobs:
         check_lfs_integrity
         echo "LFS integrity check completed successfully"
 
+    - name: Define repository list
+      run: |
+        # Hardcoded list of mem0ai repositories to integrate
+        REPO_LIST="mem0 embedchainjs community-showcase .github qna-bot-template-py qna-bot-template-js chat-bot-template-py embedchain-admin examples friend-integration autogen mem0-chrome-extension companion-nextjs-starter mem0-mcp personalized-deep-research deep-research grok3-api"
+        echo "REPO_LIST=$REPO_LIST" >> $GITHUB_ENV
+        echo "Repository list: $REPO_LIST"
+
     - name: Determine branch name
       id: determine-branch
       run: |
-        BASE_BRANCH="${{ inputs.org_name }}"
+        BASE_BRANCH="mem0ai-integration"
         BRANCH="$BASE_BRANCH"
         VERSION=1
-        while git ls-remote --exit-code --heads origin "$BRANCH"; do
-          VERSION=$((VERSION + 1))
-          BRANCH="${BASE_BRANCH}-v${VERSION}"
-        done
+        
+        # Check if force sync is enabled
+        if [ "${{ inputs.force_sync }}" = "true" ]; then
+          echo "Force sync enabled, will overwrite existing branch if it exists"
+          BRANCH="$BASE_BRANCH"
+        else
+          # Find available branch name
+          while git ls-remote --exit-code --heads origin "$BRANCH"; do
+            VERSION=$((VERSION + 1))
+            BRANCH="${BASE_BRANCH}-v${VERSION}"
+          done
+        fi
+        
         echo "BRANCH_NAME=$BRANCH" >> $GITHUB_ENV
         echo "Determined branch name: $BRANCH"
 
     - name: Create or switch to branch
       run: |
-        git checkout -b $BRANCH_NAME
+        if [ "${{ inputs.force_sync }}" = "true" ] && git ls-remote --exit-code --heads origin "$BRANCH_NAME"; then
+          echo "Force sync enabled, switching to existing branch"
+          git fetch origin "$BRANCH_NAME"
+          git checkout "$BRANCH_NAME"
+        else
+          echo "Creating new branch: $BRANCH_NAME"
+          git checkout -b "$BRANCH_NAME"
+        fi
 
     - name: Clean untracked files
       run: |
         git clean -fdx
 
-    - name: Download repo_list.txt
-      uses: actions/download-artifact@v4
-      with:
-        name: repo_list
-
-    - name: Read repository list
+    - name: Clone and integrate mem0ai repositories
       run: |
-        REPO_LIST=$(cat repo_list.txt | tr '\n' ' ')
-        echo "REPO_LIST=$REPO_LIST" >> $GITHUB_ENV
+        echo "Starting integration of mem0ai repositories..."
         echo "Repository list: $REPO_LIST"
-
-    - name: Print REPO_LIST
-      run: |
-        echo "REPO_LIST: $REPO_LIST"
-
-    - name: Sync repositories
-      run: |
-        echo "REPO_LIST in sync step: $REPO_LIST"
+        
         for REPO in $REPO_LIST; do
-          if [ "$REPO" = ".github" ]; then
-            echo "Skipping .github repository..."
+          echo "Processing repository: $REPO"
+          
+          # Skip if repository already exists and force sync is not enabled
+          if [ -d "$REPO" ] && [ "${{ inputs.force_sync }}" != "true" ]; then
+            echo "Repository $REPO already exists, skipping (use force_sync to overwrite)"
             continue
           fi
-          echo "Processing $REPO..."
+          
+          # Remove existing directory if force sync is enabled
+          if [ -d "$REPO" ] && [ "${{ inputs.force_sync }}" = "true" ]; then
+            echo "Force sync enabled, removing existing $REPO directory"
+            rm -rf "$REPO"
+          fi
+          
           {
+            echo "Cloning $REPO from mem0ai organization..."
             # Clone with LFS support
-            git clone "https://github.com/${{ inputs.org_name }}/$REPO.git" "$REPO" &&
+            git clone "https://github.com/mem0ai/$REPO.git" "$REPO" &&
             
             # Setup LFS for the cloned repository
             cd "$REPO" &&
@@ -173,24 +186,35 @@ jobs:
                 cd ..
               fi
               
+              # Remove git history
+              echo "Removing git history from $REPO..."
               rm -rf "$REPO/.git"
+              
+              # Add to central repository
               git add "$REPO"
-              git commit -m "Add $REPO repository as a subfolder"
+              git commit -m "Integrate $REPO repository from mem0ai organization"
+              echo "Successfully integrated $REPO"
             else
               echo "Failed to clone $REPO or $REPO is empty"
             fi
           } || {
-            echo "Skipping $REPO due to errors..."
+            echo "ERROR: Failed to process $REPO, skipping..."
           }
         done
 
-    - name: List directories
+    - name: List integrated repositories
       run: |
+        echo "Listing integrated repositories:"
         ls -la
+        echo ""
+        echo "Contents of integrated repositories:"
         for REPO in $REPO_LIST; do
           if [ -d "$REPO" ]; then
-            echo "Contents of $REPO:"
-            ls -la "$REPO"
+            echo "=== Contents of $REPO ==="
+            ls -la "$REPO" | head -10
+            echo ""
+          else
+            echo "Repository $REPO not found"
           fi
         done
 
@@ -244,8 +268,33 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         GH_PAT: ${{ secrets.GH_PAT }}
       run: |
+        echo "Pushing changes to branch: $BRANCH_NAME"
         if [ -n "$GH_PAT" ]; then
-          git push "https://x-access-token:$GH_PAT@github.com/ZoneCog/${{ inputs.org_name }}-central.git" "$BRANCH_NAME"
+          git push "https://x-access-token:$GH_PAT@github.com/ZoneCog/mem0ai-central.git" "$BRANCH_NAME"
         else
-          git push "https://$GITHUB_TOKEN@github.com/ZoneCog/${{ inputs.org_name }}-central.git" $BRANCH_NAME
+          git push "https://$GITHUB_TOKEN@github.com/ZoneCog/mem0ai-central.git" $BRANCH_NAME
+        fi
+        echo "Successfully pushed mem0ai repository integration to branch: $BRANCH_NAME"
+
+    - name: Create Pull Request
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_PAT: ${{ secrets.GH_PAT }}
+      run: |
+        # Create a pull request for the integration
+        TITLE="Integrate mem0ai repositories into central repository"
+        BODY="This PR integrates the following repositories from the mem0ai organization:
+
+        $(echo "$REPO_LIST" | tr ' ' '\n' | sed 's/^/- /')
+
+        All repositories have been cloned, their git history removed, and integrated as subfolders in this central repository. LFS support has been maintained throughout the process."
+        
+        # Use gh CLI to create PR if available, otherwise use curl
+        if command -v gh >/dev/null 2>&1; then
+          if [ -n "$GH_PAT" ]; then
+            echo "$GH_PAT" | gh auth login --with-token
+          fi
+          gh pr create --title "$TITLE" --body "$BODY" --base main --head "$BRANCH_NAME" || echo "PR creation failed or PR already exists"
+        else
+          echo "gh CLI not available, PR creation skipped"
         fi
